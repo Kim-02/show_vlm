@@ -18,12 +18,7 @@
     body { font-family: 'Segoe UI', system-ui, sans-serif; color: var(--text); height: 100vh; overflow: hidden; background: #020702; }
 
     /* ── Background ── */
-    #videoBg {
-      position: fixed; inset: 0;
-      width: 100%; height: 100%; object-fit: cover;
-      z-index: 0; display: none;
-    }
-    #videoBg.active { display: block; }
+    /* videoCanvas is styled inline; placeholder below */
     #videoPlaceholder {
       position: fixed; inset: 0; z-index: 0;
       display: flex; align-items: center; justify-content: center;
@@ -210,7 +205,7 @@
 </head>
 <body>
 
-<img id="videoBg" src="" alt="">
+<canvas id="videoCanvas" style="position:fixed;inset:0;width:100%;height:100%;object-fit:cover;z-index:0;display:none;"></canvas>
 <div id="videoPlaceholder">카메라 연결 대기 중...</div>
 
 <div id="liveBadge"><div class="dot"></div>LIVE</div>
@@ -284,6 +279,11 @@
       <div class="m-sec-title">기본 분석 프롬프트</div>
       <textarea class="m-textarea" id="promptModal">{{ settings.prompt }}</textarea>
       <button class="btn-apply" onclick="applyFromModal()">적용 후 닫기</button>
+    </div>
+
+    <div class="m-sec" style="border-top:1px solid rgba(118,185,0,0.1);padding-top:14px;">
+      <button class="btn-apply" onclick="saveAllSettings()" style="background:rgba(118,185,0,0.15);border:1px solid var(--g-dim);color:var(--g);">&#128190; 모든 설정 저장</button>
+      <div id="saveMsg" style="font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--g);text-align:center;margin-top:6px;opacity:0;transition:opacity .3s;"></div>
     </div>
   </div>
 </div>
@@ -378,6 +378,30 @@
     closeCfg();
   }
 
+  // ── Canvas video loop ─────────────────────────────────────────────────────
+  const videoCanvas = document.getElementById('videoCanvas');
+  const videoCtx = videoCanvas.getContext('2d');
+  let videoRunning = false;
+
+  async function videoLoop() {
+    if (!videoRunning) return;
+    const t0 = performance.now();
+    try {
+      const resp = await fetch('/frame', { cache: 'no-store' });
+      if (resp.status === 200) {
+        const blob = await resp.blob();
+        const bmp  = await createImageBitmap(blob);
+        if (videoCanvas.width  !== bmp.width)  videoCanvas.width  = bmp.width;
+        if (videoCanvas.height !== bmp.height) videoCanvas.height = bmp.height;
+        videoCtx.drawImage(bmp, 0, 0);
+        bmp.close();
+      }
+    } catch(_) { /* camera not ready yet */ }
+    // Target ~30fps; subtract elapsed to stay on cadence
+    const delay = Math.max(0, 33 - (performance.now() - t0));
+    if (videoRunning) setTimeout(videoLoop, delay);
+  }
+
   function startStream() {
     send({
       action: 'start_stream',
@@ -393,22 +417,47 @@
     });
     document.getElementById('startBtn').disabled = true;
     document.getElementById('stopBtn').disabled  = false;
-    const img = document.getElementById('videoBg');
-    img.src = '/video_feed?' + Date.now();
-    img.classList.add('active');
+    videoRunning = true;
+    videoCanvas.style.display = 'block';
     document.getElementById('videoPlaceholder').style.display = 'none';
     document.getElementById('liveBadge').classList.add('on');
+    videoLoop();
   }
 
   function stopStream() {
     send({ action: 'stop_stream' });
     document.getElementById('startBtn').disabled = false;
     document.getElementById('stopBtn').disabled  = true;
-    const img = document.getElementById('videoBg');
-    img.classList.remove('active'); img.src = '';
+    videoRunning = false;
+    videoCanvas.style.display = 'none';
     document.getElementById('videoPlaceholder').style.display = 'flex';
     document.getElementById('liveBadge').classList.remove('on');
     setSb('');
+  }
+
+  // ── Save all settings ─────────────────────────────────────────────────────
+  function saveAllSettings() {
+    const prompt = document.getElementById('promptModal').value.trim();
+    document.getElementById('promptText').value = prompt;
+    autoResize();
+    send({
+      action:     'save_settings',
+      cam_ip:     document.getElementById('camIp').value,
+      cam_port:   document.getElementById('camPort').value,
+      cam_user:   document.getElementById('camUser').value,
+      cam_pw:     document.getElementById('camPw').value,
+      cam_path:   document.getElementById('camPath').value,
+      vllm_url:   document.getElementById('vllmUrl').value,
+      model_name: document.getElementById('modelName').value,
+      api_key:    document.getElementById('apiKey').value,
+      prompt,
+    });
+    // show saved confirmation
+    const msg = document.getElementById('saveMsg');
+    msg.textContent = '✓ 저장됨';
+    msg.style.opacity = '1';
+    clearTimeout(msg._t);
+    msg._t = setTimeout(() => { msg.style.opacity = '0'; }, 2000);
   }
 
   function autoResize() {

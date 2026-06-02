@@ -5,6 +5,7 @@ RTSP CCTV VLM Analyzer (Web)
 """
 
 import json
+import os
 import threading
 import time
 import queue
@@ -17,7 +18,7 @@ import io
 from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
@@ -34,6 +35,8 @@ output_frame = None
 output_lock = threading.Lock()
 running = False
 
+SETTINGS_FILE = "settings.json"
+
 settings = {
     "cam_ip": "192.168.0.15",
     "cam_port": "554",
@@ -46,6 +49,28 @@ settings = {
     "prompt": "이 영상에서 위험한 행동이나 안전 문제를 분석하고 보고해 주세요.",
 }
 settings_lock = threading.Lock()
+
+
+def load_settings():
+    if not os.path.exists(SETTINGS_FILE):
+        return
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
+            saved = json.load(f)
+        with settings_lock:
+            settings.update({k: v for k, v in saved.items() if k in settings})
+    except Exception:
+        pass
+
+
+def save_settings():
+    with settings_lock:
+        data = dict(settings)
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 # ─── WebSocket Manager ────────────────────────────────────────────────────────
 class ConnectionManager:
@@ -88,6 +113,7 @@ manager = ConnectionManager()
 @app.on_event("startup")
 async def startup():
     manager._loop = asyncio.get_event_loop()
+    load_settings()
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -261,6 +287,23 @@ def video_feed():
     )
 
 
+@app.get("/frame")
+def get_frame():
+    """Returns the latest camera frame as a single JPEG (for canvas polling)."""
+    with output_lock:
+        frame = output_frame
+    if frame is None:
+        return Response(status_code=204)
+    ret, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    if not ret:
+        return Response(status_code=204)
+    return Response(
+        content=jpeg.tobytes(),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     global running
@@ -277,6 +320,7 @@ async def websocket_endpoint(ws: WebSocket):
                         if key in data:
                             settings[key] = data[key]
                     rtsp_url = build_rtsp_url(settings)
+                save_settings()
 
                 if not running:
                     running = True
@@ -293,7 +337,17 @@ async def websocket_endpoint(ws: WebSocket):
             elif action == "update_prompt":
                 with settings_lock:
                     settings["prompt"] = data.get("prompt", settings["prompt"])
+                save_settings()
                 await ws.send_json({"type": "status", "text": "● 프롬프트 업데이트됨"})
+
+            elif action == "save_settings":
+                with settings_lock:
+                    for key in ("cam_ip", "cam_port", "cam_user", "cam_pw", "cam_path",
+                                "vllm_url", "model_name", "api_key", "prompt"):
+                        if key in data:
+                            settings[key] = data[key]
+                save_settings()
+                await ws.send_json({"type": "status", "text": "● 설정 저장됨"})
 
     except WebSocketDisconnect:
         manager.disconnect(ws)
