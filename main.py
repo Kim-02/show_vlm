@@ -4,6 +4,7 @@ RTSP CCTV VLM Analyzer (Web)
 - MJPEG video stream via StreamingResponse
 """
 
+import json
 import threading
 import time
 import queue
@@ -117,7 +118,8 @@ def encode_frame_base64(frame_bgr):
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-def call_vllm(frame_bgr, prompt, vllm_url, model_name, api_key="test-key"):
+def call_vllm_stream(frame_bgr, prompt, vllm_url, model_name, api_key="test-key"):
+    """Yields text chunks from the vLLM streaming API."""
     b64 = encode_frame_base64(frame_bgr)
     payload = {
         "model": model_name,
@@ -132,22 +134,38 @@ def call_vllm(frame_bgr, prompt, vllm_url, model_name, api_key="test-key"):
         ],
         "max_tokens": 512,
         "temperature": 0.1,
+        "stream": True,
     }
     try:
-        resp = requests.post(
+        with requests.post(
             f"{vllm_url}/chat/completions",
             json=payload,
             headers={"Authorization": f"Bearer {api_key}"},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+            timeout=60,
+            stream=True,
+        ) as resp:
+            resp.raise_for_status()
+            for raw in resp.iter_lines():
+                if not raw:
+                    continue
+                line = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+                if not line.startswith("data: "):
+                    continue
+                data_str = line[6:]
+                if data_str.strip() == "[DONE]":
+                    break
+                try:
+                    delta = json.loads(data_str)["choices"][0]["delta"].get("content", "")
+                    if delta:
+                        yield delta
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    pass
     except requests.exceptions.ConnectionError:
-        return "[오류] vLLM 서버에 연결할 수 없습니다. 서버 URL을 확인하세요."
+        yield "[오류] vLLM 서버에 연결할 수 없습니다."
     except requests.exceptions.Timeout:
-        return "[오류] 요청 시간 초과 (30초)"
+        yield "[오류] 요청 시간 초과 (60초)"
     except Exception as e:
-        return f"[오류] {str(e)}"
+        yield f"[오류] {str(e)}"
 
 
 # ─── Worker Threads ───────────────────────────────────────────────────────────
@@ -201,10 +219,14 @@ def vlm_analysis_worker():
 
         ts = datetime.now().strftime("%H:%M:%S")
         manager.emit({"type": "status", "text": f"[{ts}] 분석 중..."})
+        manager.emit({"type": "result_start", "time": ts})
 
-        result = call_vllm(frame, prompt, vllm_url, model, api_key)
+        for chunk in call_vllm_stream(frame, prompt, vllm_url, model, api_key):
+            manager.emit({"type": "chunk", "text": chunk})
+
+        manager.emit({"type": "result_end"})
         ts2 = datetime.now().strftime("%H:%M:%S")
-        manager.emit({"type": "result", "text": f"[{ts2}]\n{result}"})
+        manager.emit({"type": "status", "text": f"● 스트리밍 중 [{ts2}]"})
 
 
 # ─── MJPEG Stream ─────────────────────────────────────────────────────────────

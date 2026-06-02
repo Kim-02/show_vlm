@@ -3,386 +3,287 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>VLM Analyzer</title>
+  <title>Video Analytics Agent</title>
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-
-    body {
-      font-family: 'Segoe UI', sans-serif;
-      color: #fff;
-      height: 100vh;
-      overflow: hidden;
-      background: #070b18;
+    :root {
+      --g:      #76b900;
+      --g-dim:  rgba(118, 185, 0, 0.22);
+      --g-glow: rgba(118, 185, 0, 0.10);
+      --panel:  rgba(2, 7, 2, 0.86);
+      --text:   #ddeedd;
+      --muted:  #4a5e4a;
     }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; color: var(--text); height: 100vh; overflow: hidden; background: #020702; }
 
     /* ── Background ── */
     #videoBg {
       position: fixed; inset: 0;
-      width: 100%; height: 100%;
-      object-fit: cover;
-      z-index: 0;
-      display: none;
+      width: 100%; height: 100%; object-fit: cover;
+      z-index: 0; display: none;
     }
-    /* subtle vignette so text overlays read cleanly */
     #videoBg.active { display: block; }
-    body::after {
+    #videoPlaceholder {
+      position: fixed; inset: 0; z-index: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase;
+      color: #1a2a1a;
+    }
+
+    /* ── LIVE badge ── */
+    #liveBadge {
+      position: fixed; top: 18px; left: 18px; z-index: 20;
+      display: none; align-items: center; gap: 5px;
+      background: rgba(0,0,0,0.72); border: 1px solid rgba(220,40,20,0.55);
+      padding: 4px 10px 4px 8px; border-radius: 2px;
+      font-size: 9px; font-weight: 700; letter-spacing: 0.18em; color: #ff3a22;
+    }
+    #liveBadge.on { display: flex; }
+    #liveBadge .dot { width: 6px; height: 6px; border-radius: 50%; background: #ff3a22; animation: blink-dot 1s step-end infinite; }
+    @keyframes blink-dot { 0%,100%{opacity:1} 50%{opacity:0.2} }
+
+    /* ── Side panel ── */
+    .side { position: fixed; top: 16px; right: 16px; bottom: 16px; width: 390px; z-index: 10; display: flex; flex-direction: column; gap: 8px; }
+
+    /* ── NV panel base ── */
+    .nv {
+      background: var(--panel);
+      border: 1px solid var(--g-dim);
+      border-radius: 3px;
+      backdrop-filter: blur(22px) saturate(1.3);
+      -webkit-backdrop-filter: blur(22px) saturate(1.3);
+      box-shadow: 0 0 28px var(--g-glow), inset 0 1px 0 rgba(118,185,0,0.07);
+      position: relative; overflow: hidden;
+    }
+    /* thin green top-edge accent */
+    .nv::after {
       content: '';
-      position: fixed; inset: 0;
-      background: radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.5) 100%);
-      z-index: 1;
+      position: absolute; top: 0; left: 12%; right: 12%;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--g), transparent);
+      opacity: 0.55;
       pointer-events: none;
     }
-    #videoPlaceholder {
-      position: fixed; inset: 0;
-      display: flex; align-items: center; justify-content: center;
-      color: #2a3a5a;
-      font-size: 16px;
-      z-index: 0;
-      letter-spacing: 0.05em;
+
+    /* ── Panel header row ── */
+    .ph {
+      display: flex; align-items: center; gap: 8px;
+      padding: 9px 13px 8px;
+      border-bottom: 1px solid rgba(118,185,0,0.09);
+    }
+    .ph-label {
+      font-size: 9px; font-weight: 700;
+      letter-spacing: 0.18em; text-transform: uppercase;
+      color: var(--g); flex: 1;
     }
 
-    /* ── Glass card ── */
-    .glass {
-      background: rgba(6, 10, 24, 0.62);
-      backdrop-filter: blur(16px) saturate(1.4);
-      -webkit-backdrop-filter: blur(16px) saturate(1.4);
-      border: 1px solid rgba(255, 255, 255, 0.11);
-      border-radius: 14px;
-    }
+    /* ── Status badge ── */
+    .sb { display: flex; align-items: center; gap: 5px; }
+    .sb-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); transition: background 0.3s; flex-shrink: 0; }
+    .sb-text { font-size: 9px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); transition: color 0.3s; }
+    .sb.analyzing .sb-dot { background: #e8a000; animation: pulse 0.9s ease-in-out infinite; }
+    .sb.analyzing .sb-text { color: #e8a000; }
+    .sb.done .sb-dot { background: var(--g); animation: none; }
+    .sb.done .sb-text { color: var(--g); }
+    @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.25;transform:scale(0.6)} }
 
-    /* ── Main layout ── */
-    .overlay {
-      position: fixed; inset: 0;
-      z-index: 2;
-      display: flex;
-      flex-direction: column;
-      padding: 14px 16px;
-      gap: 10px;
-    }
+    .time-chip { font-size: 9px; font-family: Consolas, monospace; color: var(--muted); letter-spacing: 0.05em; }
 
-    /* ── Prompt card ── */
-    .prompt-card {
-      display: flex;
-      align-items: flex-end;
-      gap: 8px;
-      padding: 10px 14px 10px 18px;
-      flex-shrink: 0;
-    }
+    /* ── Query input ── */
+    .query-body { display: flex; align-items: flex-end; gap: 7px; padding: 9px 12px; }
+    .q-prefix { color: var(--g); font-family: Consolas, monospace; font-size: 14px; flex-shrink: 0; line-height: 1.4; }
     #promptText {
-      flex: 1;
-      background: transparent;
-      border: none; outline: none;
-      color: #fff;
-      font-family: 'Segoe UI', sans-serif;
-      font-size: 15px;
-      resize: none;
-      height: 24px;
-      max-height: 110px;
-      overflow-y: hidden;
-      line-height: 1.55;
+      flex: 1; background: transparent; border: none; outline: none;
+      color: var(--text); font-size: 13px; resize: none;
+      height: 21px; max-height: 96px; overflow-y: hidden; line-height: 1.55;
+      caret-color: var(--g); font-family: 'Segoe UI', system-ui, sans-serif;
     }
-    #promptText::placeholder { color: rgba(255,255,255,0.32); }
-    .btn-send {
-      background: rgba(0, 180, 255, 0.65);
-      border: none; border-radius: 9px;
-      color: #fff; width: 36px; height: 36px;
-      cursor: pointer; font-size: 17px;
+    #promptText::placeholder { color: #243324; }
+    .btn-submit {
+      background: var(--g); border: none; border-radius: 2px;
+      color: #000; width: 30px; height: 30px;
+      cursor: pointer; font-size: 13px; font-weight: 900;
       display: flex; align-items: center; justify-content: center;
-      flex-shrink: 0;
-      transition: background 0.18s;
+      flex-shrink: 0; transition: background 0.14s;
     }
-    .btn-send:hover { background: rgba(0, 210, 255, 0.88); }
+    .btn-submit:hover { background: #8fd200; }
 
-    /* ── Result card ── */
-    .result-card {
-      flex: 1;
-      padding: 14px 18px;
-      overflow-y: auto;
-      min-height: 0;
+    /* ── Response body ── */
+    .res-body {
+      overflow: hidden; max-height: 0;
+      padding: 0 13px;
+      transition: max-height 0.32s cubic-bezier(0.4, 0, 0.2, 1),
+                  padding 0.32s ease;
     }
-    .result-header {
-      display: flex;
-      align-items: center;
-      gap: 7px;
-      color: #00c8f0;
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      margin-bottom: 12px;
-      user-select: none;
+    .res-body.open { max-height: 58vh; overflow-y: auto; padding: 10px 13px 14px; }
+    .res-text {
+      display: block; font-size: 13px; line-height: 1.74;
+      color: #c8ddc8; white-space: pre-wrap; word-break: break-word;
     }
-    .status-dot {
-      width: 7px; height: 7px;
-      border-radius: 50%;
-      background: #2a3a5a;
-      transition: background 0.4s;
-      flex-shrink: 0;
+    .res-text.typing::after {
+      content: '▮'; color: var(--g);
+      animation: cur 0.7s step-end infinite; font-size: 11px;
     }
-    .status-dot.idle    { background: #2a3a5a; }
-    .status-dot.running { background: #ffaa00; animation: pulse 1s ease-in-out infinite; }
-    .status-dot.updated { background: #00cc66; animation: none; }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50%       { opacity: 0.3; transform: scale(0.65); }
-    }
-    .result-clear {
-      margin-left: auto;
-      background: none; border: none;
-      color: rgba(255,255,255,0.28);
-      font-size: 11px; cursor: pointer;
-      padding: 2px 4px;
-      transition: color 0.15s;
-    }
-    .result-clear:hover { color: rgba(255,255,255,0.7); }
+    @keyframes cur { 0%,100%{opacity:1} 50%{opacity:0} }
 
-    #resultList { display: flex; flex-direction: column; gap: 0; }
-
-    .result-block {
-      padding: 10px 0;
-      border-bottom: 1px solid rgba(255,255,255,0.07);
-      font-size: 14px;
-      line-height: 1.68;
-      color: #dce8f0;
-      white-space: pre-wrap;
-      word-break: break-word;
-      animation: fadeInUp 0.35s ease;
+    /* ── Controls ── */
+    .ctrl {
+      flex-shrink: 0; margin-top: auto;
+      display: flex; align-items: center; gap: 6px;
+      padding: 8px 12px;
     }
-    .result-block:last-child { border-bottom: none; }
-    .result-time {
-      display: block;
-      font-size: 10px;
-      color: rgba(255,255,255,0.28);
-      margin-bottom: 5px;
-      letter-spacing: 0.04em;
+    #statusText { flex: 1; font-size: 10px; font-family: Consolas, monospace; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: 0.04em; }
+    .btn-c {
+      padding: 6px 15px; border: none; border-radius: 2px;
+      font-size: 9px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+      cursor: pointer; transition: opacity 0.14s, background 0.14s;
     }
-    .result-empty {
-      color: rgba(255,255,255,0.22);
-      font-size: 14px;
-      text-align: center;
-      margin-top: 36px;
-    }
-    @keyframes fadeInUp {
-      from { opacity: 0; transform: translateY(10px); }
-      to   { opacity: 1; transform: translateY(0); }
-    }
-
-    /* ── Bottom bar ── */
-    .bottom-bar {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 14px;
-      flex-shrink: 0;
-    }
-    #statusText {
-      flex: 1;
-      font-size: 12px;
-      color: rgba(255,255,255,0.42);
-    }
-    .btn-ctrl {
-      padding: 7px 18px;
-      border: none; border-radius: 9px;
-      font-size: 13px; font-weight: 700;
-      cursor: pointer; color: #fff;
-      transition: opacity 0.18s, background 0.18s;
-    }
-    .btn-ctrl:disabled { opacity: 0.32; cursor: not-allowed; }
-    .btn-start { background: rgba(0, 160, 60, 0.75); }
-    .btn-start:hover:not(:disabled) { background: rgba(0, 190, 75, 0.9); }
-    .btn-stop  { background: rgba(200, 30, 0, 0.75); }
-    .btn-stop:hover:not(:disabled)  { background: rgba(230, 45, 0, 0.9); }
-    .btn-gear {
-      background: rgba(255,255,255,0.1);
-      border: none; border-radius: 9px;
-      color: rgba(255,255,255,0.75);
-      width: 36px; height: 36px;
-      cursor: pointer; font-size: 17px;
+    .btn-c:disabled { opacity: 0.25; cursor: not-allowed; }
+    .btn-start { background: var(--g); color: #000; }
+    .btn-start:hover:not(:disabled) { background: #8fd200; }
+    .btn-stop  { background: rgba(190,28,0,0.8); color: #fff; }
+    .btn-stop:hover:not(:disabled)  { background: rgba(220,38,0,0.9); }
+    .btn-cfg {
+      background: rgba(118,185,0,0.08); border: 1px solid var(--g-dim);
+      border-radius: 2px; color: var(--g);
+      width: 30px; height: 30px; cursor: pointer; font-size: 14px;
       display: flex; align-items: center; justify-content: center;
-      transition: background 0.18s;
+      transition: background 0.14s;
     }
-    .btn-gear:hover { background: rgba(255,255,255,0.22); }
+    .btn-cfg:hover { background: rgba(118,185,0,0.18); }
 
     /* ── Settings Modal ── */
-    .modal-backdrop {
-      position: fixed; inset: 0;
-      background: rgba(0,0,0,0.55);
-      backdrop-filter: blur(5px);
-      -webkit-backdrop-filter: blur(5px);
-      z-index: 100;
-      display: none;
-      align-items: center;
-      justify-content: center;
+    .modal-bg {
+      position: fixed; inset: 0; z-index: 100;
+      background: rgba(0,0,0,0.68);
+      backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px);
+      display: none; align-items: center; justify-content: center;
     }
-    .modal-backdrop.open { display: flex; }
-
+    .modal-bg.open { display: flex; }
     .modal {
-      background: #0c1220;
-      border: 1px solid rgba(0, 200, 255, 0.22);
-      border-radius: 16px;
-      width: 430px;
-      max-height: 82vh;
-      overflow-y: auto;
-      padding: 22px 22px 18px;
-      animation: modalIn 0.22s ease;
+      background: #010601; border: 1px solid var(--g-dim);
+      border-radius: 3px; width: 420px; max-height: 84vh; overflow-y: auto; padding: 20px;
+      box-shadow: 0 0 40px rgba(118,185,0,0.14);
+      animation: mIn 0.18s ease;
     }
-    @keyframes modalIn {
-      from { opacity: 0; transform: scale(0.95) translateY(8px); }
-      to   { opacity: 1; transform: scale(1) translateY(0); }
-    }
-    .modal-head {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 18px;
-    }
-    .modal-title { color: #00c8f0; font-size: 15px; font-weight: 700; }
-    .modal-close {
-      background: none; border: none;
-      color: rgba(255,255,255,0.4);
-      font-size: 20px; line-height: 1;
-      cursor: pointer;
-      transition: color 0.15s;
-    }
-    .modal-close:hover { color: #fff; }
-
-    .modal-section { margin-bottom: 18px; }
-    .modal-sec-title {
-      color: rgba(255,255,255,0.42);
-      font-size: 10px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      padding-bottom: 6px;
-      border-bottom: 1px solid rgba(255,255,255,0.07);
-      margin-bottom: 10px;
-    }
+    @keyframes mIn { from{opacity:0;transform:scale(0.95) translateY(8px)} to{opacity:1;transform:scale(1) translateY(0)} }
+    .m-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 1px solid rgba(118,185,0,0.13); }
+    .m-title { color: var(--g); font-size: 9px; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; }
+    .m-close { background: none; border: none; color: var(--muted); font-size: 16px; cursor: pointer; line-height: 1; transition: color 0.14s; }
+    .m-close:hover { color: var(--text); }
+    .m-sec { margin-bottom: 18px; }
+    .m-sec-title { color: var(--g); font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.18em; padding-bottom: 5px; border-bottom: 1px solid rgba(118,185,0,0.1); margin-bottom: 10px; }
     .field { display: flex; align-items: center; gap: 10px; margin-bottom: 7px; }
-    .field label { color: #aab; font-size: 12px; width: 78px; flex-shrink: 0; }
+    .field label { color: var(--muted); font-size: 11px; width: 78px; flex-shrink: 0; }
     .field input {
       flex: 1; min-width: 0;
-      background: rgba(0,0,0,0.38);
-      border: 1px solid rgba(255,255,255,0.09);
-      border-radius: 7px;
-      color: #fff;
-      font-family: Consolas, monospace;
-      font-size: 12px;
-      padding: 5px 9px;
-      outline: none;
-      transition: border-color 0.15s;
+      background: rgba(118,185,0,0.04); border: 1px solid rgba(118,185,0,0.14); border-radius: 2px;
+      color: var(--text); font-family: Consolas, monospace; font-size: 12px;
+      padding: 5px 9px; outline: none; transition: border-color 0.14s;
     }
-    .field input:focus { border-color: rgba(0, 200, 255, 0.45); }
-    .rtsp-preview {
-      background: rgba(0,0,0,0.38);
-      border: 1px solid rgba(255,255,255,0.07);
-      border-radius: 7px;
-      padding: 5px 9px;
-      font-family: Consolas, monospace;
-      font-size: 11px;
-      color: #00e87a;
-      word-break: break-all;
-      margin-top: 2px;
+    .field input:focus { border-color: rgba(118,185,0,0.48); }
+    .rtsp-box {
+      background: rgba(0,0,0,0.35); border: 1px solid rgba(118,185,0,0.09); border-radius: 2px;
+      padding: 5px 9px; font-family: Consolas, monospace; font-size: 11px;
+      color: var(--g); word-break: break-all; margin-top: 3px;
     }
-    .modal-prompt {
-      width: 100%;
-      background: rgba(0,0,0,0.38);
-      border: 1px solid rgba(255,255,255,0.09);
-      border-radius: 7px;
-      color: #fff;
-      font-family: 'Segoe UI', sans-serif;
-      font-size: 13px;
-      padding: 9px;
-      resize: vertical; height: 80px;
-      outline: none;
-      transition: border-color 0.15s;
+    .m-textarea {
+      width: 100%; background: rgba(118,185,0,0.04); border: 1px solid rgba(118,185,0,0.14); border-radius: 2px;
+      color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 13px;
+      padding: 9px; resize: vertical; height: 76px; outline: none; transition: border-color 0.14s; caret-color: var(--g);
     }
-    .modal-prompt:focus { border-color: rgba(0, 200, 255, 0.45); }
-    .btn-apply-modal {
-      display: block;
-      width: 100%; margin-top: 8px;
-      padding: 9px;
-      background: rgba(0, 110, 210, 0.7);
-      border: none; border-radius: 8px;
-      color: #fff; font-size: 13px; font-weight: 700;
-      cursor: pointer;
-      transition: background 0.18s;
+    .m-textarea:focus { border-color: rgba(118,185,0,0.48); }
+    .btn-apply {
+      display: block; width: 100%; margin-top: 8px; padding: 8px;
+      background: var(--g); border: none; border-radius: 2px;
+      color: #000; font-size: 9px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+      cursor: pointer; transition: background 0.14s;
     }
-    .btn-apply-modal:hover { background: rgba(0, 135, 245, 0.88); }
+    .btn-apply:hover { background: #8fd200; }
 
-    /* Scrollbar */
-    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar { width: 3px; }
     ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb { background: rgba(118,185,0,0.22); border-radius: 2px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(118,185,0,0.42); }
   </style>
 </head>
 <body>
 
-<!-- Background video -->
 <img id="videoBg" src="" alt="">
 <div id="videoPlaceholder">카메라 연결 대기 중...</div>
 
-<!-- ── Main overlay ── -->
-<div class="overlay">
+<div id="liveBadge"><div class="dot"></div>LIVE</div>
 
-  <!-- Prompt input -->
-  <div class="prompt-card glass">
-    <textarea id="promptText" placeholder="분석 질문을 입력하세요…" rows="1"
-      onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();applyPrompt();}"
-    >{{ settings.prompt }}</textarea>
-    <button class="btn-send" onclick="applyPrompt()" title="프롬프트 적용">&#10148;</button>
-  </div>
+<!-- ── Side panel ── -->
+<div class="side">
 
-  <!-- Result panel -->
-  <div class="result-card glass">
-    <div class="result-header">
-      <div class="status-dot idle" id="analysisDot"></div>
-      VLM 분석 결과
-      <button class="result-clear" onclick="clearResults()" title="결과 지우기">지우기</button>
+  <!-- Query -->
+  <div class="nv">
+    <div class="ph">
+      <span class="ph-label">분석 쿼리</span>
     </div>
-    <div id="resultList">
-      <div class="result-empty" id="resultEmpty">분석 결과가 여기에 표시됩니다</div>
+    <div class="query-body">
+      <span class="q-prefix">›</span>
+      <textarea id="promptText" placeholder="질문을 입력하세요…" rows="1"
+        onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();applyPrompt();}"
+      >{{ settings.prompt }}</textarea>
+      <button class="btn-submit" onclick="applyPrompt()" title="적용">↵</button>
     </div>
   </div>
 
-  <!-- Bottom controls -->
-  <div class="bottom-bar glass">
+  <!-- Response -->
+  <div class="nv">
+    <div class="ph">
+      <span class="ph-label">에이전트 응답</span>
+      <span class="time-chip" id="timeChip"></span>
+      <div class="sb" id="sb"><div class="sb-dot"></div><span class="sb-text">대기</span></div>
+    </div>
+    <div class="res-body" id="resBody">
+      <span class="res-text" id="resText"></span>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="nv ctrl">
     <span id="statusText">● 대기 중</span>
-    <button class="btn-ctrl btn-start" id="startBtn" onclick="startStream()">&#9654; 시작</button>
-    <button class="btn-ctrl btn-stop"  id="stopBtn"  onclick="stopStream()" disabled>&#9632; 중지</button>
-    <button class="btn-gear" onclick="openSettings()" title="설정">&#9881;</button>
+    <button class="btn-c btn-start" id="startBtn" onclick="startStream()">START</button>
+    <button class="btn-c btn-stop"  id="stopBtn"  onclick="stopStream()" disabled>STOP</button>
+    <button class="btn-cfg" onclick="openCfg()" title="설정">⚙</button>
   </div>
+
 </div>
 
-<!-- ── Settings Modal ── -->
-<div class="modal-backdrop" id="modalBackdrop" onclick="if(event.target===this)closeSettings()">
+<!-- ── Settings modal ── -->
+<div class="modal-bg" id="modalBg" onclick="if(event.target===this)closeCfg()">
   <div class="modal">
-    <div class="modal-head">
-      <span class="modal-title">&#9881; 설정</span>
-      <button class="modal-close" onclick="closeSettings()">&#10005;</button>
+    <div class="m-head">
+      <span class="m-title">시스템 설정</span>
+      <button class="m-close" onclick="closeCfg()">✕</button>
     </div>
 
-    <div class="modal-section">
-      <div class="modal-sec-title">카메라 접속 정보</div>
+    <div class="m-sec">
+      <div class="m-sec-title">카메라 접속 정보</div>
       <div class="field"><label>카메라 IP</label>   <input id="camIp"   value="{{ settings.cam_ip }}"></div>
       <div class="field"><label>포트</label>         <input id="camPort" value="{{ settings.cam_port }}"></div>
       <div class="field"><label>사용자명</label>     <input id="camUser" value="{{ settings.cam_user }}"></div>
       <div class="field"><label>비밀번호</label>     <input id="camPw"   type="password" value="{{ settings.cam_pw }}"></div>
       <div class="field"><label>스트림 경로</label>  <input id="camPath" value="{{ settings.cam_path }}"></div>
-      <div style="font-size:10px;color:rgba(255,255,255,0.3);margin:6px 0 3px;">RTSP URL 미리보기</div>
-      <div class="rtsp-preview" id="rtspPreview"></div>
+      <div style="font-size:8px;color:var(--muted);margin:6px 0 3px;letter-spacing:.14em;text-transform:uppercase;">RTSP URL</div>
+      <div class="rtsp-box" id="rtspPreview"></div>
     </div>
 
-    <div class="modal-section">
-      <div class="modal-sec-title">vLLM 서버</div>
+    <div class="m-sec">
+      <div class="m-sec-title">vLLM 서버</div>
       <div class="field"><label>서버 URL</label>  <input id="vllmUrl"   value="{{ settings.vllm_url }}"></div>
       <div class="field"><label>모델명</label>     <input id="modelName" value="{{ settings.model_name }}"></div>
       <div class="field"><label>API 키</label>     <input id="apiKey"    value="{{ settings.api_key }}"></div>
     </div>
 
-    <div class="modal-section">
-      <div class="modal-sec-title">기본 분석 프롬프트</div>
-      <textarea class="modal-prompt" id="promptModal">{{ settings.prompt }}</textarea>
-      <button class="btn-apply-modal" onclick="applyPromptFromModal()">&#10003; 적용 후 닫기</button>
+    <div class="m-sec">
+      <div class="m-sec-title">기본 분석 프롬프트</div>
+      <textarea class="m-textarea" id="promptModal">{{ settings.prompt }}</textarea>
+      <button class="btn-apply" onclick="applyFromModal()">적용 후 닫기</button>
     </div>
   </div>
 </div>
@@ -390,101 +291,96 @@
 <script>
   // ── WebSocket ─────────────────────────────────────────────────────────────
   const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage = ({ data }) => {
+    const d = JSON.parse(data);
+    if      (d.type === 'status')       setStatus(d.text);
+    else if (d.type === 'result_start') onStart(d.time);
+    else if (d.type === 'chunk')        onChunk(d.text);
+    else if (d.type === 'result_end')   onEnd();
+  };
+  ws.onclose = () => setStatus('● 연결 끊김');
+  const send = obj => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify(obj));
 
-  ws.onmessage = function(event) {
-    const data = JSON.parse(event.data);
-    if (data.type === 'status') {
-      document.getElementById('statusText').textContent = data.text;
-    } else if (data.type === 'result') {
-      addResult(data.text);
+  function setStatus(t) { document.getElementById('statusText').textContent = t; }
+
+  // ── Streaming response ────────────────────────────────────────────────────
+  const resBody = document.getElementById('resBody');
+  const resText = document.getElementById('resText');
+  const timeChip = document.getElementById('timeChip');
+  const sb = document.getElementById('sb');
+  let wasOpen = false;
+
+  function setSb(state) {
+    sb.className = 'sb ' + state;
+    sb.querySelector('.sb-text').textContent = {analyzing:'분석 중', done:'완료'}[state] ?? '대기';
+  }
+
+  function onStart(time) {
+    timeChip.textContent = time;
+    setSb('analyzing');
+    if (wasOpen) {
+      resBody.classList.remove('open');
+      resText.classList.remove('typing');
+      setTimeout(() => { resText.textContent = ''; }, 310);
+    } else {
+      resText.textContent = '';
     }
-  };
-
-  ws.onclose = function() {
-    document.getElementById('statusText').textContent = '● 서버 연결 끊김';
-  };
-
-  function send(obj) {
-    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+    wasOpen = false;
   }
 
-  // ── Result display ────────────────────────────────────────────────────────
-  function addResult(text) {
-    document.getElementById('resultEmpty')?.remove();
-
-    const list = document.getElementById('resultList');
-    const block = document.createElement('div');
-    block.className = 'result-block';
-
-    const timeEl = document.createElement('span');
-    timeEl.className = 'result-time';
-    timeEl.textContent = new Date().toLocaleTimeString('ko-KR');
-    block.appendChild(timeEl);
-
-    const textNode = document.createTextNode(text);
-    block.appendChild(textNode);
-
-    list.insertBefore(block, list.firstChild);
-
-    // Dot flash
-    const dot = document.getElementById('analysisDot');
-    dot.className = 'status-dot updated';
-    clearTimeout(dot._t);
-    dot._t = setTimeout(() => {
-      dot.className = 'status-dot running';
-    }, 2200);
+  function onChunk(text) {
+    if (!wasOpen) { resBody.classList.add('open'); wasOpen = true; }
+    resText.classList.add('typing');
+    resText.textContent += text;
+    if (resBody.scrollHeight - resBody.scrollTop - resBody.clientHeight < 40)
+      resBody.scrollTop = resBody.scrollHeight;
   }
 
-  function clearResults() {
-    const list = document.getElementById('resultList');
-    list.innerHTML = '<div class="result-empty" id="resultEmpty">분석 결과가 여기에 표시됩니다</div>';
+  function onEnd() {
+    resText.classList.remove('typing');
+    setSb('done');
+    clearTimeout(sb._t);
+    sb._t = setTimeout(() => setSb(''), 4000);
   }
 
   // ── RTSP preview ──────────────────────────────────────────────────────────
-  function updateRtspPreview() {
-    const user = document.getElementById('camUser').value;
-    const ip   = document.getElementById('camIp').value;
-    const port = document.getElementById('camPort').value;
-    let   path = document.getElementById('camPath').value;
+  function updateRtsp() {
+    const u = document.getElementById('camUser').value;
+    const ip = document.getElementById('camIp').value;
+    const p  = document.getElementById('camPort').value;
+    let path = document.getElementById('camPath').value;
     if (path && !path.startsWith('/')) path = '/' + path;
-    const cred = user ? `${user}:****@` : '';
-    document.getElementById('rtspPreview').textContent = `rtsp://${cred}${ip}:${port}${path}`;
+    document.getElementById('rtspPreview').textContent =
+      `rtsp://${u ? u+':****@' : ''}${ip}:${p}${path}`;
   }
   ['camIp','camPort','camUser','camPw','camPath'].forEach(id =>
-    document.getElementById(id).addEventListener('input', updateRtspPreview)
-  );
-  updateRtspPreview();
+    document.getElementById(id).addEventListener('input', updateRtsp));
+  updateRtsp();
 
-  // ── Modal ────────────────────────────────────────────────────────────────
-  function openSettings() {
-    document.getElementById('modalBackdrop').classList.add('open');
-  }
-  function closeSettings() {
-    document.getElementById('modalBackdrop').classList.remove('open');
-  }
-  document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') closeSettings();
-  });
+  // ── Modal ─────────────────────────────────────────────────────────────────
+  const openCfg  = () => document.getElementById('modalBg').classList.add('open');
+  const closeCfg = () => document.getElementById('modalBg').classList.remove('open');
+  document.addEventListener('keydown', e => e.key === 'Escape' && closeCfg());
 
   // ── Controls ─────────────────────────────────────────────────────────────
   function applyPrompt() {
-    const prompt = document.getElementById('promptText').value.trim();
-    if (!prompt) return;
-    document.getElementById('promptModal').value = prompt;
-    send({ action: 'update_prompt', prompt });
+    const p = document.getElementById('promptText').value.trim();
+    if (!p) return;
+    document.getElementById('promptModal').value = p;
+    send({ action: 'update_prompt', prompt: p });
   }
 
-  function applyPromptFromModal() {
-    const prompt = document.getElementById('promptModal').value.trim();
-    document.getElementById('promptText').value = prompt;
-    autoResizePrompt();
-    send({ action: 'update_prompt', prompt });
-    closeSettings();
+  function applyFromModal() {
+    const p = document.getElementById('promptModal').value.trim();
+    document.getElementById('promptText').value = p;
+    autoResize();
+    send({ action: 'update_prompt', prompt: p });
+    closeCfg();
   }
 
   function startStream() {
-    const data = {
-      action:     'start_stream',
+    send({
+      action: 'start_stream',
       cam_ip:     document.getElementById('camIp').value,
       cam_port:   document.getElementById('camPort').value,
       cam_user:   document.getElementById('camUser').value,
@@ -494,41 +390,33 @@
       model_name: document.getElementById('modelName').value,
       api_key:    document.getElementById('apiKey').value,
       prompt:     document.getElementById('promptText').value.trim(),
-    };
-    send(data);
-
+    });
     document.getElementById('startBtn').disabled = true;
     document.getElementById('stopBtn').disabled  = false;
-
     const img = document.getElementById('videoBg');
     img.src = '/video_feed?' + Date.now();
     img.classList.add('active');
     document.getElementById('videoPlaceholder').style.display = 'none';
-
-    document.getElementById('analysisDot').className = 'status-dot running';
+    document.getElementById('liveBadge').classList.add('on');
   }
 
   function stopStream() {
     send({ action: 'stop_stream' });
-
     document.getElementById('startBtn').disabled = false;
     document.getElementById('stopBtn').disabled  = true;
-
     const img = document.getElementById('videoBg');
-    img.classList.remove('active');
-    img.src = '';
+    img.classList.remove('active'); img.src = '';
     document.getElementById('videoPlaceholder').style.display = 'flex';
-
-    document.getElementById('analysisDot').className = 'status-dot idle';
+    document.getElementById('liveBadge').classList.remove('on');
+    setSb('');
   }
 
-  // ── Prompt textarea auto-resize ───────────────────────────────────────────
-  function autoResizePrompt() {
+  function autoResize() {
     const el = document.getElementById('promptText');
     el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, 110) + 'px';
+    el.style.height = Math.min(el.scrollHeight, 96) + 'px';
   }
-  document.getElementById('promptText').addEventListener('input', autoResizePrompt);
+  document.getElementById('promptText').addEventListener('input', autoResize);
 </script>
 </body>
 </html>
