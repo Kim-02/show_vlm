@@ -228,7 +228,7 @@ def mjpeg_generator():
 async def index(request: Request):
     with settings_lock:
         s = dict(settings)
-    return templates.TemplateResponse("index.html", {"request": request, "settings": s})
+    return templates.TemplateResponse(request, "index.html", {"settings": s})
 
 
 @app.get("/video_feed")
