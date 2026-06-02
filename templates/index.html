@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VLM Analyzer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      color: #fff;
+      height: 100vh;
+      overflow: hidden;
+      background: #070b18;
+    }
+
+    /* ── Background ── */
+    #videoBg {
+      position: fixed; inset: 0;
+      width: 100%; height: 100%;
+      object-fit: cover;
+      z-index: 0;
+      display: none;
+    }
+    /* subtle vignette so text overlays read cleanly */
+    #videoBg.active { display: block; }
+    body::after {
+      content: '';
+      position: fixed; inset: 0;
+      background: radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.5) 100%);
+      z-index: 1;
+      pointer-events: none;
+    }
+    #videoPlaceholder {
+      position: fixed; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      color: #2a3a5a;
+      font-size: 16px;
+      z-index: 0;
+      letter-spacing: 0.05em;
+    }
+
+    /* ── Glass card ── */
+    .glass {
+      background: rgba(6, 10, 24, 0.62);
+      backdrop-filter: blur(16px) saturate(1.4);
+      -webkit-backdrop-filter: blur(16px) saturate(1.4);
+      border: 1px solid rgba(255, 255, 255, 0.11);
+      border-radius: 14px;
+    }
+
+    /* ── Main layout ── */
+    .overlay {
+      position: fixed; inset: 0;
+      z-index: 2;
+      display: flex;
+      flex-direction: column;
+      padding: 14px 16px;
+      gap: 10px;
+    }
+
+    /* ── Prompt card ── */
+    .prompt-card {
+      display: flex;
+      align-items: flex-end;
+      gap: 8px;
+      padding: 10px 14px 10px 18px;
+      flex-shrink: 0;
+    }
+    #promptText {
+      flex: 1;
+      background: transparent;
+      border: none; outline: none;
+      color: #fff;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 15px;
+      resize: none;
+      height: 24px;
+      max-height: 110px;
+      overflow-y: hidden;
+      line-height: 1.55;
+    }
+    #promptText::placeholder { color: rgba(255,255,255,0.32); }
+    .btn-send {
+      background: rgba(0, 180, 255, 0.65);
+      border: none; border-radius: 9px;
+      color: #fff; width: 36px; height: 36px;
+      cursor: pointer; font-size: 17px;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+      transition: background 0.18s;
+    }
+    .btn-send:hover { background: rgba(0, 210, 255, 0.88); }
+
+    /* ── Result card ── */
+    .result-card {
+      flex: 1;
+      padding: 14px 18px;
+      overflow-y: auto;
+      min-height: 0;
+    }
+    .result-header {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      color: #00c8f0;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+      user-select: none;
+    }
+    .status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: #2a3a5a;
+      transition: background 0.4s;
+      flex-shrink: 0;
+    }
+    .status-dot.idle    { background: #2a3a5a; }
+    .status-dot.running { background: #ffaa00; animation: pulse 1s ease-in-out infinite; }
+    .status-dot.updated { background: #00cc66; animation: none; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%       { opacity: 0.3; transform: scale(0.65); }
+    }
+    .result-clear {
+      margin-left: auto;
+      background: none; border: none;
+      color: rgba(255,255,255,0.28);
+      font-size: 11px; cursor: pointer;
+      padding: 2px 4px;
+      transition: color 0.15s;
+    }
+    .result-clear:hover { color: rgba(255,255,255,0.7); }
+
+    #resultList { display: flex; flex-direction: column; gap: 0; }
+
+    .result-block {
+      padding: 10px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+      font-size: 14px;
+      line-height: 1.68;
+      color: #dce8f0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      animation: fadeInUp 0.35s ease;
+    }
+    .result-block:last-child { border-bottom: none; }
+    .result-time {
+      display: block;
+      font-size: 10px;
+      color: rgba(255,255,255,0.28);
+      margin-bottom: 5px;
+      letter-spacing: 0.04em;
+    }
+    .result-empty {
+      color: rgba(255,255,255,0.22);
+      font-size: 14px;
+      text-align: center;
+      margin-top: 36px;
+    }
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ── Bottom bar ── */
+    .bottom-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 14px;
+      flex-shrink: 0;
+    }
+    #statusText {
+      flex: 1;
+      font-size: 12px;
+      color: rgba(255,255,255,0.42);
+    }
+    .btn-ctrl {
+      padding: 7px 18px;
+      border: none; border-radius: 9px;
+      font-size: 13px; font-weight: 700;
+      cursor: pointer; color: #fff;
+      transition: opacity 0.18s, background 0.18s;
+    }
+    .btn-ctrl:disabled { opacity: 0.32; cursor: not-allowed; }
+    .btn-start { background: rgba(0, 160, 60, 0.75); }
+    .btn-start:hover:not(:disabled) { background: rgba(0, 190, 75, 0.9); }
+    .btn-stop  { background: rgba(200, 30, 0, 0.75); }
+    .btn-stop:hover:not(:disabled)  { background: rgba(230, 45, 0, 0.9); }
+    .btn-gear {
+      background: rgba(255,255,255,0.1);
+      border: none; border-radius: 9px;
+      color: rgba(255,255,255,0.75);
+      width: 36px; height: 36px;
+      cursor: pointer; font-size: 17px;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.18s;
+    }
+    .btn-gear:hover { background: rgba(255,255,255,0.22); }
+
+    /* ── Settings Modal ── */
+    .modal-backdrop {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.55);
+      backdrop-filter: blur(5px);
+      -webkit-backdrop-filter: blur(5px);
+      z-index: 100;
+      display: none;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-backdrop.open { display: flex; }
+
+    .modal {
+      background: #0c1220;
+      border: 1px solid rgba(0, 200, 255, 0.22);
+      border-radius: 16px;
+      width: 430px;
+      max-height: 82vh;
+      overflow-y: auto;
+      padding: 22px 22px 18px;
+      animation: modalIn 0.22s ease;
+    }
+    @keyframes modalIn {
+      from { opacity: 0; transform: scale(0.95) translateY(8px); }
+      to   { opacity: 1; transform: scale(1) translateY(0); }
+    }
+    .modal-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 18px;
+    }
+    .modal-title { color: #00c8f0; font-size: 15px; font-weight: 700; }
+    .modal-close {
+      background: none; border: none;
+      color: rgba(255,255,255,0.4);
+      font-size: 20px; line-height: 1;
+      cursor: pointer;
+      transition: color 0.15s;
+    }
+    .modal-close:hover { color: #fff; }
+
+    .modal-section { margin-bottom: 18px; }
+    .modal-sec-title {
+      color: rgba(255,255,255,0.42);
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      padding-bottom: 6px;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+      margin-bottom: 10px;
+    }
+    .field { display: flex; align-items: center; gap: 10px; margin-bottom: 7px; }
+    .field label { color: #aab; font-size: 12px; width: 78px; flex-shrink: 0; }
+    .field input {
+      flex: 1; min-width: 0;
+      background: rgba(0,0,0,0.38);
+      border: 1px solid rgba(255,255,255,0.09);
+      border-radius: 7px;
+      color: #fff;
+      font-family: Consolas, monospace;
+      font-size: 12px;
+      padding: 5px 9px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .field input:focus { border-color: rgba(0, 200, 255, 0.45); }
+    .rtsp-preview {
+      background: rgba(0,0,0,0.38);
+      border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 7px;
+      padding: 5px 9px;
+      font-family: Consolas, monospace;
+      font-size: 11px;
+      color: #00e87a;
+      word-break: break-all;
+      margin-top: 2px;
+    }
+    .modal-prompt {
+      width: 100%;
+      background: rgba(0,0,0,0.38);
+      border: 1px solid rgba(255,255,255,0.09);
+      border-radius: 7px;
+      color: #fff;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 13px;
+      padding: 9px;
+      resize: vertical; height: 80px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .modal-prompt:focus { border-color: rgba(0, 200, 255, 0.45); }
+    .btn-apply-modal {
+      display: block;
+      width: 100%; margin-top: 8px;
+      padding: 9px;
+      background: rgba(0, 110, 210, 0.7);
+      border: none; border-radius: 8px;
+      color: #fff; font-size: 13px; font-weight: 700;
+      cursor: pointer;
+      transition: background 0.18s;
+    }
+    .btn-apply-modal:hover { background: rgba(0, 135, 245, 0.88); }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 4px; }
+  </style>
+</head>
+<body>
+
+<!-- Background video -->
+<img id="videoBg" src="" alt="">
+<div id="videoPlaceholder">카메라 연결 대기 중...</div>
+
+<!-- ── Main overlay ── -->
+<div class="overlay">
+
+  <!-- Prompt input -->
+  <div class="prompt-card glass">
+    <textarea id="promptText" placeholder="분석 질문을 입력하세요…" rows="1"
+      onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();applyPrompt();}"
+    >{{ settings.prompt }}</textarea>
+    <button class="btn-send" onclick="applyPrompt()" title="프롬프트 적용">&#10148;</button>
+  </div>
+
+  <!-- Result panel -->
+  <div class="result-card glass">
+    <div class="result-header">
+      <div class="status-dot idle" id="analysisDot"></div>
+      VLM 분석 결과
+      <button class="result-clear" onclick="clearResults()" title="결과 지우기">지우기</button>
+    </div>
+    <div id="resultList">
+      <div class="result-empty" id="resultEmpty">분석 결과가 여기에 표시됩니다</div>
+    </div>
+  </div>
+
+  <!-- Bottom controls -->
+  <div class="bottom-bar glass">
+    <span id="statusText">● 대기 중</span>
+    <button class="btn-ctrl btn-start" id="startBtn" onclick="startStream()">&#9654; 시작</button>
+    <button class="btn-ctrl btn-stop"  id="stopBtn"  onclick="stopStream()" disabled>&#9632; 중지</button>
+    <button class="btn-gear" onclick="openSettings()" title="설정">&#9881;</button>
+  </div>
+</div>
+
+<!-- ── Settings Modal ── -->
+<div class="modal-backdrop" id="modalBackdrop" onclick="if(event.target===this)closeSettings()">
+  <div class="modal">
+    <div class="modal-head">
+      <span class="modal-title">&#9881; 설정</span>
+      <button class="modal-close" onclick="closeSettings()">&#10005;</button>
+    </div>
+
+    <div class="modal-section">
+      <div class="modal-sec-title">카메라 접속 정보</div>
+      <div class="field"><label>카메라 IP</label>   <input id="camIp"   value="{{ settings.cam_ip }}"></div>
+      <div class="field"><label>포트</label>         <input id="camPort" value="{{ settings.cam_port }}"></div>
+      <div class="field"><label>사용자명</label>     <input id="camUser" value="{{ settings.cam_user }}"></div>
+      <div class="field"><label>비밀번호</label>     <input id="camPw"   type="password" value="{{ settings.cam_pw }}"></div>
+      <div class="field"><label>스트림 경로</label>  <input id="camPath" value="{{ settings.cam_path }}"></div>
+      <div style="font-size:10px;color:rgba(255,255,255,0.3);margin:6px 0 3px;">RTSP URL 미리보기</div>
+      <div class="rtsp-preview" id="rtspPreview"></div>
+    </div>
+
+    <div class="modal-section">
+      <div class="modal-sec-title">vLLM 서버</div>
+      <div class="field"><label>서버 URL</label>  <input id="vllmUrl"   value="{{ settings.vllm_url }}"></div>
+      <div class="field"><label>모델명</label>     <input id="modelName" value="{{ settings.model_name }}"></div>
+      <div class="field"><label>API 키</label>     <input id="apiKey"    value="{{ settings.api_key }}"></div>
+    </div>
+
+    <div class="modal-section">
+      <div class="modal-sec-title">기본 분석 프롬프트</div>
+      <textarea class="modal-prompt" id="promptModal">{{ settings.prompt }}</textarea>
+      <button class="btn-apply-modal" onclick="applyPromptFromModal()">&#10003; 적용 후 닫기</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ── WebSocket ─────────────────────────────────────────────────────────────
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+
+  ws.onmessage = function(event) {
+    const data = JSON.parse(event.data);
+    if (data.type === 'status') {
+      document.getElementById('statusText').textContent = data.text;
+    } else if (data.type === 'result') {
+      addResult(data.text);
+    }
+  };
+
+  ws.onclose = function() {
+    document.getElementById('statusText').textContent = '● 서버 연결 끊김';
+  };
+
+  function send(obj) {
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+  }
+
+  // ── Result display ────────────────────────────────────────────────────────
+  function addResult(text) {
+    document.getElementById('resultEmpty')?.remove();
+
+    const list = document.getElementById('resultList');
+    const block = document.createElement('div');
+    block.className = 'result-block';
+
+    const timeEl = document.createElement('span');
+    timeEl.className = 'result-time';
+    timeEl.textContent = new Date().toLocaleTimeString('ko-KR');
+    block.appendChild(timeEl);
+
+    const textNode = document.createTextNode(text);
+    block.appendChild(textNode);
+
+    list.insertBefore(block, list.firstChild);
+
+    // Dot flash
+    const dot = document.getElementById('analysisDot');
+    dot.className = 'status-dot updated';
+    clearTimeout(dot._t);
+    dot._t = setTimeout(() => {
+      dot.className = 'status-dot running';
+    }, 2200);
+  }
+
+  function clearResults() {
+    const list = document.getElementById('resultList');
+    list.innerHTML = '<div class="result-empty" id="resultEmpty">분석 결과가 여기에 표시됩니다</div>';
+  }
+
+  // ── RTSP preview ──────────────────────────────────────────────────────────
+  function updateRtspPreview() {
+    const user = document.getElementById('camUser').value;
+    const ip   = document.getElementById('camIp').value;
+    const port = document.getElementById('camPort').value;
+    let   path = document.getElementById('camPath').value;
+    if (path && !path.startsWith('/')) path = '/' + path;
+    const cred = user ? `${user}:****@` : '';
+    document.getElementById('rtspPreview').textContent = `rtsp://${cred}${ip}:${port}${path}`;
+  }
+  ['camIp','camPort','camUser','camPw','camPath'].forEach(id =>
+    document.getElementById(id).addEventListener('input', updateRtspPreview)
+  );
+  updateRtspPreview();
+
+  // ── Modal ────────────────────────────────────────────────────────────────
+  function openSettings() {
+    document.getElementById('modalBackdrop').classList.add('open');
+  }
+  function closeSettings() {
+    document.getElementById('modalBackdrop').classList.remove('open');
+  }
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeSettings();
+  });
+
+  // ── Controls ─────────────────────────────────────────────────────────────
+  function applyPrompt() {
+    const prompt = document.getElementById('promptText').value.trim();
+    if (!prompt) return;
+    document.getElementById('promptModal').value = prompt;
+    send({ action: 'update_prompt', prompt });
+  }
+
+  function applyPromptFromModal() {
+    const prompt = document.getElementById('promptModal').value.trim();
+    document.getElementById('promptText').value = prompt;
+    autoResizePrompt();
+    send({ action: 'update_prompt', prompt });
+    closeSettings();
+  }
+
+  function startStream() {
+    const data = {
+      action:     'start_stream',
+      cam_ip:     document.getElementById('camIp').value,
+      cam_port:   document.getElementById('camPort').value,
+      cam_user:   document.getElementById('camUser').value,
+      cam_pw:     document.getElementById('camPw').value,
+      cam_path:   document.getElementById('camPath').value,
+      vllm_url:   document.getElementById('vllmUrl').value,
+      model_name: document.getElementById('modelName').value,
+      api_key:    document.getElementById('apiKey').value,
+      prompt:     document.getElementById('promptText').value.trim(),
+    };
+    send(data);
+
+    document.getElementById('startBtn').disabled = true;
+    document.getElementById('stopBtn').disabled  = false;
+
+    const img = document.getElementById('videoBg');
+    img.src = '/video_feed?' + Date.now();
+    img.classList.add('active');
+    document.getElementById('videoPlaceholder').style.display = 'none';
+
+    document.getElementById('analysisDot').className = 'status-dot running';
+  }
+
+  function stopStream() {
+    send({ action: 'stop_stream' });
+
+    document.getElementById('startBtn').disabled = false;
+    document.getElementById('stopBtn').disabled  = true;
+
+    const img = document.getElementById('videoBg');
+    img.classList.remove('active');
+    img.src = '';
+    document.getElementById('videoPlaceholder').style.display = 'flex';
+
+    document.getElementById('analysisDot').className = 'status-dot idle';
+  }
+
+  // ── Prompt textarea auto-resize ───────────────────────────────────────────
+  function autoResizePrompt() {
+    const el = document.getElementById('promptText');
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 110) + 'px';
+  }
+  document.getElementById('promptText').addEventListener('input', autoResizePrompt);
+</script>
+</body>
+</html>
