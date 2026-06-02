@@ -29,10 +29,20 @@ VLLM_MODEL = "/media/ds/DATA/models/Qwen2.5-VL-3B"
 CAPTURE_FPS = 2
 FRAME_INTERVAL = 1.0 / CAPTURE_FPS
 
+# FFMPEG low-latency options — must be set before any VideoCapture is created
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+    "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|max_delay;0"
+)
+
 # ─── State ────────────────────────────────────────────────────────────────────
 frame_queue = queue.Queue(maxsize=2)
 output_frame = None
-output_lock = threading.Lock()
+output_lock  = threading.Lock()
+
+# Pre-encoded JPEG cache so /frame responses never block on encoding
+latest_jpeg  = None
+jpeg_lock    = threading.Lock()
+
 running = False
 
 SETTINGS_FILE = "settings.json"
@@ -195,33 +205,45 @@ def call_vllm_stream(frame_bgr, prompt, vllm_url, model_name, api_key="test-key"
 
 
 # ─── Worker Threads ───────────────────────────────────────────────────────────
-def rtsp_capture_worker(rtsp_url):
-    global running, output_frame
-    cap = cv2.VideoCapture(rtsp_url)
+def _open_cap(rtsp_url):
+    cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    last_time = 0
+    return cap
+
+
+def rtsp_capture_worker(rtsp_url):
+    global running, output_frame, latest_jpeg
+    cap = _open_cap(rtsp_url)
+    last_analysis_time = 0
 
     while running:
         ret, frame = cap.read()
         if not ret:
-            time.sleep(0.5)
+            time.sleep(0.1)
             cap.release()
-            cap = cv2.VideoCapture(rtsp_url)
+            cap = _open_cap(rtsp_url)
             continue
 
+        # ── Display: update every frame (no rate-limit) ──────────────────────
+        with output_lock:
+            output_frame = frame
+
+        # Pre-encode JPEG so /frame responses are instant
+        ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        if ok:
+            with jpeg_lock:
+                latest_jpeg = jpeg.tobytes()
+
+        # ── VLM analysis queue: rate-limited to CAPTURE_FPS ─────────────────
         now = time.time()
-        if now - last_time >= FRAME_INTERVAL:
-            with output_lock:
-                output_frame = frame.copy()
-            if not frame_queue.full():
-                frame_queue.put(frame.copy())
-            else:
+        if now - last_analysis_time >= FRAME_INTERVAL:
+            if frame_queue.full():
                 try:
                     frame_queue.get_nowait()
                 except queue.Empty:
                     pass
-                frame_queue.put(frame.copy())
-            last_time = now
+            frame_queue.put(frame.copy())
+            last_analysis_time = now
 
     cap.release()
 
@@ -257,17 +279,13 @@ def vlm_analysis_worker():
 
 # ─── MJPEG Stream ─────────────────────────────────────────────────────────────
 def mjpeg_generator():
-    global output_frame
     while True:
-        with output_lock:
-            frame = output_frame
-        if frame is None:
-            time.sleep(0.1)
+        with jpeg_lock:
+            data = latest_jpeg
+        if data is None:
+            time.sleep(0.05)
             continue
-        ret, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        if not ret:
-            continue
-        yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg.tobytes() + b"\r\n")
+        yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + data + b"\r\n")
         time.sleep(1 / 30)
 
 
@@ -289,16 +307,13 @@ def video_feed():
 
 @app.get("/frame")
 def get_frame():
-    """Returns the latest camera frame as a single JPEG (for canvas polling)."""
-    with output_lock:
-        frame = output_frame
-    if frame is None:
-        return Response(status_code=204)
-    ret, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-    if not ret:
+    """Returns the latest pre-encoded JPEG frame (zero encoding latency)."""
+    with jpeg_lock:
+        data = latest_jpeg
+    if data is None:
         return Response(status_code=204)
     return Response(
-        content=jpeg.tobytes(),
+        content=data,
         media_type="image/jpeg",
         headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
     )
