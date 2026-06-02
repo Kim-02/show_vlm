@@ -2,3 +2,5 @@ opencv-python
 Pillow
 requests
 fastapi
+uvicorn
+jinja2
