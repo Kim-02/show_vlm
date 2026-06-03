@@ -256,16 +256,39 @@ def encode_frame_base64(frame_bgr, max_pixels: int = MAX_VLM_PIXELS_PER_FRAME) -
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
+def _stamp_frame(frame, idx: int, total: int):
+    """각 프레임 좌상단에 시간 라벨을 삽입해 VLM이 순서를 파악하게 한다."""
+    out = frame.copy()
+    age = total - idx - 1          # 0 = 현재, total-1 = 가장 오래된 프레임
+    time_str = "now" if age == 0 else f"{age}s ago"
+    label = f"Frame {idx + 1}/{total}  ({time_str})"
+    font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1
+    (tw, th), _ = cv2.getTextSize(label, font, scale, thick)
+    cv2.rectangle(out, (4, 4), (tw + 14, th + 14), (0, 0, 0), cv2.FILLED)
+    cv2.putText(out, label, (9, th + 9), font, scale, (0, 185, 118), thick, cv2.LINE_AA)
+    return out
+
+
 def call_vllm_stream(frames: list, prompt: str, vllm_url: str,
                      model_name: str, api_key: str = "test-key"):
-    """10초 링버퍼 프레임 전부를 한 요청에 넣어 스트리밍 응답을 yield."""
-    # 이미지 → text 순서 (Qwen2.5-VL 권장)
+    """링버퍼 프레임 전부를 시간 컨텍스트와 함께 한 요청에 넣어 스트리밍."""
+    n = len(frames)
+
+    # ① 각 이미지에 프레임 번호/시간 라벨 삽입
     content = []
-    for f in frames:
-        b64 = encode_frame_base64(f)
+    for i, f in enumerate(frames):
+        labeled = _stamp_frame(f, i, n)
+        b64 = encode_frame_base64(labeled)
         content.append({"type": "image_url",
                          "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-    content.append({"type": "text", "text": prompt})
+
+    # ② 프롬프트 앞에 시간 흐름 설명 추가 → VLM이 이동 방향 등을 이해
+    temporal_ctx = (
+        f"The {n} images above are consecutive frames captured 1 second apart "
+        f"(Frame 1 = {n-1}s ago → Frame {n} = now). "
+        "Use the temporal sequence to understand motion direction, speed, and changes over time.\n\n"
+    )
+    content.append({"type": "text", "text": temporal_ctx + prompt})
 
     payload = {
         "model": model_name,
@@ -346,42 +369,17 @@ def rtsp_capture_worker(rtsp_url):
     cap.release()
 
 
-def vlm_analysis_worker():
-    """링버퍼에 쌓인 최대 10장을 한 번에 vLLM으로 전송해 분석."""
-    global running
-    while running:
-        # 버퍼에 프레임이 쌓일 때까지 대기
-        with frame_buffer_lock:
-            n = len(frame_buffer)
-        if n == 0:
-            time.sleep(0.5)
-            continue
-
-        with settings_lock:
-            prompt   = settings["prompt"]
-            vllm_url = settings["vllm_url"]
-            model    = settings["model_name"]
-            api_key  = settings["api_key"]
-
-        if not prompt:
-            time.sleep(0.5)
-            continue
-
-        # 현재 버퍼 스냅샷 (최대 10장)
-        with frame_buffer_lock:
-            frames = list(frame_buffer)
-
-        ts = datetime.now().strftime("%H:%M:%S")
-        manager.emit({"type": "status",
-                       "text": f"[{ts}] 분석 중… ({len(frames)}장)"})
-        manager.emit({"type": "result_start", "time": ts})
-
-        for chunk in call_vllm_stream(frames, prompt, vllm_url, model, api_key):
-            manager.emit({"type": "chunk", "text": chunk})
-
-        manager.emit({"type": "result_end"})
-        ts2 = datetime.now().strftime("%H:%M:%S")
-        manager.emit({"type": "status", "text": f"● 스트리밍 중 [{ts2}]"})
+def _run_vlm_once(frames: list, prompt: str, vllm_url: str,
+                  model: str, api_key: str):
+    """전송 버튼 클릭 시 1회 실행되는 VLM 분석 스레드."""
+    ts = datetime.now().strftime("%H:%M:%S")
+    manager.emit({"type": "status",  "text": f"[{ts}] 분석 중… ({len(frames)}장)"})
+    manager.emit({"type": "result_start", "time": ts})
+    for chunk in call_vllm_stream(frames, prompt, vllm_url, model, api_key):
+        manager.emit({"type": "chunk", "text": chunk})
+    manager.emit({"type": "result_end"})
+    ts2 = datetime.now().strftime("%H:%M:%S")
+    manager.emit({"type": "status", "text": f"● 분석 완료 [{ts2}]"})
 
 
 # ─── MJPEG Stream ─────────────────────────────────────────────────────────────
@@ -449,7 +447,6 @@ async def websocket_endpoint(ws: WebSocket):
                     running = True
                     threading.Thread(target=rtsp_capture_worker,  args=(rtsp_url,), daemon=True).start()
                     threading.Thread(target=yolo_annotate_worker, daemon=True).start()
-                    threading.Thread(target=vlm_analysis_worker,  daemon=True).start()
 
                 display = rtsp_url.split("@")[-1]
                 await ws.send_json({"type": "status", "text": f"● 스트리밍 중 — {display}"})
@@ -458,11 +455,38 @@ async def websocket_endpoint(ws: WebSocket):
                 running = False
                 await ws.send_json({"type": "status", "text": "● 중지됨"})
 
+            elif action == "analyze":
+                prompt = data.get("prompt", "").strip()
+                if prompt:
+                    with settings_lock:
+                        settings["prompt"] = prompt
+                    save_settings()
+                else:
+                    with settings_lock:
+                        prompt = settings["prompt"]
+
+                with frame_buffer_lock:
+                    frames = list(frame_buffer)
+
+                if not frames:
+                    await ws.send_json({"type": "status",
+                                        "text": "⚠ 프레임 없음 — 스트림을 먼저 시작하세요."})
+                else:
+                    with settings_lock:
+                        vllm_url = settings["vllm_url"]
+                        model    = settings["model_name"]
+                        api_key  = settings["api_key"]
+                    threading.Thread(
+                        target=_run_vlm_once,
+                        args=(frames, prompt, vllm_url, model, api_key),
+                        daemon=True,
+                    ).start()
+
             elif action == "update_prompt":
                 with settings_lock:
                     settings["prompt"] = data.get("prompt", settings["prompt"])
                 save_settings()
-                await ws.send_json({"type": "status", "text": "● 프롬프트 업데이트됨"})
+                await ws.send_json({"type": "status", "text": "● 프롬프트 저장됨"})
 
             elif action == "save_settings":
                 with settings_lock:

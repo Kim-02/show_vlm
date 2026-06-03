@@ -373,7 +373,8 @@
     const p = document.getElementById('promptText').value.trim();
     if (!p) return;
     document.getElementById('promptModal').value = p;
-    send({ action: 'update_prompt', prompt: p });
+    // 전송 버튼 = 즉시 분석 (현재 링버퍼 10장 사용)
+    send({ action: 'analyze', prompt: p });
   }
 
   function applyFromModal() {
