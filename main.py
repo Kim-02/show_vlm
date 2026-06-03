@@ -59,13 +59,30 @@ def _load_yolo(model_path: str) -> object | None:
         try:
             os.environ.setdefault("YOLO_AUTOINSTALL", "False")
             os.environ.setdefault("ULTRALYTICS_SKIP_REQUIREMENTS_CHECKS", "1")
+
+            # Jetson: TensorRT/torch CUDA는 시스템 dist-packages에만 있음
+            # 레포 yolo_runtime.py 의 configure_ultralytics_runtime() 동일 로직
+            import sys
+            from pathlib import Path
+            major, minor = sys.version_info.major, sys.version_info.minor
+            for p in [
+                Path(f"/usr/lib/python{major}.{minor}/dist-packages"),
+                Path("/usr/lib/python3/dist-packages"),
+            ]:
+                if p.exists() and str(p) not in sys.path:
+                    sys.path.append(str(p))
+
+            # ultralytics 자동설치 방지 (임포트 후에도 재적용)
+            try:
+                import ultralytics.utils as _u; _u.AUTOINSTALL = False
+            except Exception:
+                pass
+
             from ultralytics import YOLO
             import numpy as np
 
-            # TensorRT .engine 파일은 task 명시 필요 (레포 detector.py 동일)
             m = YOLO(model_path, task="detect")
-            # warmup — inference 첫 실행 지연 제거
-            m(np.zeros((640, 640, 3), dtype=np.uint8), verbose=False)
+            m(np.zeros((640, 640, 3), dtype=np.uint8), verbose=False)  # warmup
             _yolo_model = m
             print(f"[YOLO] model ready: {model_path}  classes={m.names}")
         except Exception as exc:
