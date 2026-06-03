@@ -49,7 +49,6 @@ running = False
 # ─── YOLO ─────────────────────────────────────────────────────────────────────
 _yolo_model  = None
 _yolo_lock   = threading.Lock()
-_YOLO_BGR    = (0, 185, 118)    # NVIDIA green #76b900 in BGR
 
 
 def _load_yolo(model_path: str) -> object | None:
@@ -62,27 +61,16 @@ def _load_yolo(model_path: str) -> object | None:
             os.environ.setdefault("ULTRALYTICS_SKIP_REQUIREMENTS_CHECKS", "1")
             from ultralytics import YOLO
             import numpy as np
-            m = YOLO(model_path)
-            m(np.zeros((640, 640, 3), dtype=np.uint8), verbose=False)  # warmup
+
+            # TensorRT .engine 파일은 task 명시 필요 (레포 detector.py 동일)
+            m = YOLO(model_path, task="detect")
+            # warmup — inference 첫 실행 지연 제거
+            m(np.zeros((640, 640, 3), dtype=np.uint8), verbose=False)
             _yolo_model = m
-            print(f"[YOLO] model ready: {model_path}")
+            print(f"[YOLO] model ready: {model_path}  classes={m.names}")
         except Exception as exc:
             print(f"[YOLO] load failed ({model_path}): {exc}")
     return _yolo_model
-
-
-def _draw_boxes(frame, results):
-    out = frame.copy()
-    for box in results.boxes:
-        x1, y1, x2, y2 = map(int, box.xyxy[0])
-        conf  = float(box.conf[0])
-        label = results.names[int(box.cls[0])]
-        cv2.rectangle(out, (x1, y1), (x2, y2), _YOLO_BGR, 2)
-        text = f"{label} {conf:.0%}"
-        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.46, 1)
-        cv2.rectangle(out, (x1, y1 - th - 7), (x1 + tw + 5, y1), _YOLO_BGR, cv2.FILLED)
-        cv2.putText(out, text, (x1 + 2, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (0, 0, 0), 1)
-    return out
 
 
 def yolo_annotate_worker():
@@ -90,7 +78,10 @@ def yolo_annotate_worker():
     with settings_lock:
         model_path = settings.get("yolo_model_path", "/media/ds/DATA/yolo_final/0507_best.engine")
         confidence = float(settings.get("yolo_confidence", 0.5))
+
     model = _load_yolo(model_path)
+    if model is None:
+        print("[YOLO] worker: model unavailable — streaming raw frames")
 
     while running:
         try:
@@ -100,9 +91,16 @@ def yolo_annotate_worker():
 
         if model is not None:
             try:
-                res = model(frame, conf=confidence, verbose=False)[0]
-                annotated = _draw_boxes(frame, res)
-            except Exception:
+                res        = model(frame, conf=confidence, verbose=False)[0]
+                # result.plot() — 레포 detector.py 와 동일한 방식
+                annotated  = res.plot()
+                n = len(res.boxes)
+                if n:
+                    print(f"[YOLO] {n} detection(s): "
+                          + ", ".join(f"{res.names[int(b.cls[0])]} {float(b.conf[0]):.2f}"
+                                      for b in res.boxes))
+            except Exception as exc:
+                print(f"[YOLO] inference error: {exc}")
                 annotated = frame
         else:
             annotated = frame
