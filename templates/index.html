@@ -276,6 +276,12 @@
     </div>
 
     <div class="m-sec">
+      <div class="m-sec-title">YOLO 탐지</div>
+      <div class="field"><label>모델 경로</label>  <input id="yoloPath" value="{{ settings.yolo_model_path }}"></div>
+      <div class="field"><label>신뢰도</label>      <input id="yoloConf" value="{{ settings.yolo_confidence }}" placeholder="0.0 ~ 1.0"></div>
+    </div>
+
+    <div class="m-sec">
       <div class="m-sec-title">기본 분석 프롬프트</div>
       <textarea class="m-textarea" id="promptModal">{{ settings.prompt }}</textarea>
       <button class="btn-apply" onclick="applyFromModal()">적용 후 닫기</button>
@@ -413,7 +419,9 @@
       vllm_url:   document.getElementById('vllmUrl').value,
       model_name: document.getElementById('modelName').value,
       api_key:    document.getElementById('apiKey').value,
-      prompt:     document.getElementById('promptText').value.trim(),
+      prompt:          document.getElementById('promptText').value.trim(),
+      yolo_model_path: document.getElementById('yoloPath').value,
+      yolo_confidence: parseFloat(document.getElementById('yoloConf').value) || 0.5,
     });
     document.getElementById('startBtn').disabled = true;
     document.getElementById('stopBtn').disabled  = false;
@@ -449,8 +457,10 @@
       cam_path:   document.getElementById('camPath').value,
       vllm_url:   document.getElementById('vllmUrl').value,
       model_name: document.getElementById('modelName').value,
-      api_key:    document.getElementById('apiKey').value,
+      api_key:         document.getElementById('apiKey').value,
       prompt,
+      yolo_model_path: document.getElementById('yoloPath').value,
+      yolo_confidence: parseFloat(document.getElementById('yoloConf').value) || 0.5,
     });
     // show saved confirmation
     const msg = document.getElementById('saveMsg');

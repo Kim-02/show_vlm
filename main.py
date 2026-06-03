@@ -36,14 +36,81 @@ os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
 
 # ─── State ────────────────────────────────────────────────────────────────────
 frame_queue = queue.Queue(maxsize=2)
+anno_queue  = queue.Queue(maxsize=1)   # raw frames → YOLO thread
 output_frame = None
 output_lock  = threading.Lock()
 
-# Pre-encoded JPEG cache so /frame responses never block on encoding
+# Pre-encoded JPEG cache (annotated by YOLO) served by /frame
 latest_jpeg  = None
 jpeg_lock    = threading.Lock()
 
 running = False
+
+# ─── YOLO ─────────────────────────────────────────────────────────────────────
+_yolo_model  = None
+_yolo_lock   = threading.Lock()
+_YOLO_BGR    = (0, 185, 118)    # NVIDIA green #76b900 in BGR
+
+
+def _load_yolo(model_path: str) -> object | None:
+    global _yolo_model
+    with _yolo_lock:
+        if _yolo_model is not None:
+            return _yolo_model
+        try:
+            os.environ.setdefault("YOLO_AUTOINSTALL", "False")
+            os.environ.setdefault("ULTRALYTICS_SKIP_REQUIREMENTS_CHECKS", "1")
+            from ultralytics import YOLO
+            import numpy as np
+            m = YOLO(model_path)
+            m(np.zeros((640, 640, 3), dtype=np.uint8), verbose=False)  # warmup
+            _yolo_model = m
+            print(f"[YOLO] model ready: {model_path}")
+        except Exception as exc:
+            print(f"[YOLO] load failed ({model_path}): {exc}")
+    return _yolo_model
+
+
+def _draw_boxes(frame, results):
+    out = frame.copy()
+    for box in results.boxes:
+        x1, y1, x2, y2 = map(int, box.xyxy[0])
+        conf  = float(box.conf[0])
+        label = results.names[int(box.cls[0])]
+        cv2.rectangle(out, (x1, y1), (x2, y2), _YOLO_BGR, 2)
+        text = f"{label} {conf:.0%}"
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.46, 1)
+        cv2.rectangle(out, (x1, y1 - th - 7), (x1 + tw + 5, y1), _YOLO_BGR, cv2.FILLED)
+        cv2.putText(out, text, (x1 + 2, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (0, 0, 0), 1)
+    return out
+
+
+def yolo_annotate_worker():
+    global latest_jpeg
+    with settings_lock:
+        model_path = settings.get("yolo_model_path", "0507_best.engine")
+        confidence = float(settings.get("yolo_confidence", 0.5))
+    model = _load_yolo(model_path)
+
+    while running:
+        try:
+            frame = anno_queue.get(timeout=0.5)
+        except queue.Empty:
+            continue
+
+        if model is not None:
+            try:
+                res = model(frame, conf=confidence, verbose=False)[0]
+                annotated = _draw_boxes(frame, res)
+            except Exception:
+                annotated = frame
+        else:
+            annotated = frame
+
+        ok, jpeg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        if ok:
+            with jpeg_lock:
+                latest_jpeg = jpeg.tobytes()
 
 SETTINGS_FILE = "settings.json"
 
@@ -57,6 +124,8 @@ settings = {
     "model_name": VLLM_MODEL,
     "api_key": "test-key",
     "prompt": "이 영상에서 위험한 행동이나 안전 문제를 분석하고 보고해 주세요.",
+    "yolo_model_path": "0507_best.engine",
+    "yolo_confidence": 0.5,
 }
 settings_lock = threading.Lock()
 
@@ -124,6 +193,10 @@ manager = ConnectionManager()
 async def startup():
     manager._loop = asyncio.get_event_loop()
     load_settings()
+    # Preload YOLO in background so it's warm when stream starts
+    with settings_lock:
+        mp = settings.get("yolo_model_path", "0507_best.engine")
+    threading.Thread(target=_load_yolo, args=(mp,), daemon=True).start()
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -212,7 +285,7 @@ def _open_cap(rtsp_url):
 
 
 def rtsp_capture_worker(rtsp_url):
-    global running, output_frame, latest_jpeg
+    global running, output_frame
     cap = _open_cap(rtsp_url)
     last_analysis_time = 0
 
@@ -224,15 +297,15 @@ def rtsp_capture_worker(rtsp_url):
             cap = _open_cap(rtsp_url)
             continue
 
-        # ── Display: update every frame (no rate-limit) ──────────────────────
+        # ── Display: pass to YOLO annotator (non-blocking, drop stale) ───────
         with output_lock:
             output_frame = frame
-
-        # Pre-encode JPEG so /frame responses are instant
-        ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        if ok:
-            with jpeg_lock:
-                latest_jpeg = jpeg.tobytes()
+        if anno_queue.full():
+            try:
+                anno_queue.get_nowait()
+            except queue.Empty:
+                pass
+        anno_queue.put(frame)   # no copy — YOLO worker reads it promptly
 
         # ── VLM analysis queue: rate-limited to CAPTURE_FPS ─────────────────
         now = time.time()
@@ -331,7 +404,8 @@ async def websocket_endpoint(ws: WebSocket):
             if action == "start_stream":
                 with settings_lock:
                     for key in ("cam_ip", "cam_port", "cam_user", "cam_pw", "cam_path",
-                                "vllm_url", "model_name", "api_key", "prompt"):
+                                "vllm_url", "model_name", "api_key", "prompt",
+                                "yolo_model_path", "yolo_confidence"):
                         if key in data:
                             settings[key] = data[key]
                     rtsp_url = build_rtsp_url(settings)
@@ -339,8 +413,9 @@ async def websocket_endpoint(ws: WebSocket):
 
                 if not running:
                     running = True
-                    threading.Thread(target=rtsp_capture_worker, args=(rtsp_url,), daemon=True).start()
-                    threading.Thread(target=vlm_analysis_worker, daemon=True).start()
+                    threading.Thread(target=rtsp_capture_worker,  args=(rtsp_url,), daemon=True).start()
+                    threading.Thread(target=yolo_annotate_worker, daemon=True).start()
+                    threading.Thread(target=vlm_analysis_worker,  daemon=True).start()
 
                 display = rtsp_url.split("@")[-1]
                 await ws.send_json({"type": "status", "text": f"● 스트리밍 중 — {display}"})
@@ -358,7 +433,8 @@ async def websocket_endpoint(ws: WebSocket):
             elif action == "save_settings":
                 with settings_lock:
                     for key in ("cam_ip", "cam_port", "cam_user", "cam_pw", "cam_path",
-                                "vllm_url", "model_name", "api_key", "prompt"):
+                                "vllm_url", "model_name", "api_key", "prompt",
+                                "yolo_model_path", "yolo_confidence"):
                         if key in data:
                             settings[key] = data[key]
                 save_settings()
