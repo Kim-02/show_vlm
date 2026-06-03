@@ -88,7 +88,7 @@ def _draw_boxes(frame, results):
 def yolo_annotate_worker():
     global latest_jpeg
     with settings_lock:
-        model_path = settings.get("yolo_model_path", "0507_best.engine")
+        model_path = settings.get("yolo_model_path", "/media/ds/DATA/yolo_final/0507_best.engine")
         confidence = float(settings.get("yolo_confidence", 0.5))
     model = _load_yolo(model_path)
 
