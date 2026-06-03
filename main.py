@@ -9,6 +9,7 @@ import os
 import threading
 import time
 import queue
+from collections import deque
 import base64
 import asyncio
 import requests
@@ -26,8 +27,9 @@ templates = Jinja2Templates(directory="templates")
 # ─── Config ───────────────────────────────────────────────────────────────────
 VLLM_URL = "http://localhost:1111/v1"
 VLLM_MODEL = "/media/ds/DATA/models/Qwen2.5-VL-3B"
-CAPTURE_FPS = 2
+CAPTURE_FPS = 1                     # 1fps → 10초에 10장
 FRAME_INTERVAL = 1.0 / CAPTURE_FPS
+FRAME_BUFFER_SIZE = 10              # 링버퍼 크기 (= image limit per prompt)
 
 # FFMPEG low-latency options — must be set before any VideoCapture is created
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
@@ -35,7 +37,10 @@ os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
 )
 
 # ─── State ────────────────────────────────────────────────────────────────────
-frame_queue = queue.Queue(maxsize=2)
+# 10초 링버퍼: 1fps × 10장. VLM 요청 시 전부 전송
+frame_buffer      = deque(maxlen=FRAME_BUFFER_SIZE)
+frame_buffer_lock = threading.Lock()
+
 anno_queue  = queue.Queue(maxsize=1)   # raw frames → YOLO thread
 output_frame = None
 output_lock  = threading.Lock()
@@ -60,15 +65,22 @@ def _load_yolo(model_path: str) -> object | None:
             os.environ.setdefault("YOLO_AUTOINSTALL", "False")
             os.environ.setdefault("ULTRALYTICS_SKIP_REQUIREMENTS_CHECKS", "1")
 
-            # Jetson: TensorRT/torch CUDA는 시스템 dist-packages에만 있음
-            # 레포 yolo_runtime.py 의 configure_ultralytics_runtime() 동일 로직
-            import sys
+            # Jetson: TensorRT/torch CUDA 바인딩 경로 추가
+            # 1) 시스템 dist-packages  (레포 yolo_runtime.py 동일 로직)
+            # 2) vLLM venv site-packages  (~/vllm-jetson-v092-torch27)
+            import sys, glob
             from pathlib import Path
             major, minor = sys.version_info.major, sys.version_info.minor
-            for p in [
+            candidate_paths = [
                 Path(f"/usr/lib/python{major}.{minor}/dist-packages"),
                 Path("/usr/lib/python3/dist-packages"),
-            ]:
+                Path("/usr/local/lib/python3/dist-packages"),
+            ]
+            # vLLM venv (Jetson CUDA torch + TensorRT 포함)
+            vllm_venv = Path.home() / "vllm-jetson-v092-torch27"
+            for sp in glob.glob(str(vllm_venv / "lib" / "python*" / "site-packages")):
+                candidate_paths.append(Path(sp))
+            for p in candidate_paths:
                 if p.exists() and str(p) not in sys.path:
                     sys.path.append(str(p))
 
@@ -227,35 +239,37 @@ def build_rtsp_url(s):
     return f"rtsp://{cred}{ip}:{port}{path}"
 
 
-MAX_VLM_PIXELS = 448 * 448  # Qwen2.5-VL: 28px/patch*4token, max_model_len=2048
+# 10장을 max_model_len=2048 안에 넣기 위해 프레임당 픽셀 축소
+# Qwen2.5-VL: tokens ≈ (H/28)×(W/28), 320×320 → ~130 tokens/frame × 10 = 1300 tokens
+MAX_VLM_PIXELS_PER_FRAME = 320 * 320
 
-def encode_frame_base64(frame_bgr):
+
+def encode_frame_base64(frame_bgr, max_pixels: int = MAX_VLM_PIXELS_PER_FRAME) -> str:
     frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     pil_img = Image.fromarray(frame_rgb)
-    # 토큰 한계 초과 방지: 픽셀 수가 MAX_VLM_PIXELS를 넘으면 비율 유지하며 축소
     w, h = pil_img.size
-    if w * h > MAX_VLM_PIXELS:
-        scale = (MAX_VLM_PIXELS / (w * h)) ** 0.5
+    if w * h > max_pixels:
+        scale = (max_pixels / (w * h)) ** 0.5
         pil_img = pil_img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
     buf = io.BytesIO()
     pil_img.save(buf, format="JPEG", quality=85)
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
-def call_vllm_stream(frame_bgr, prompt, vllm_url, model_name, api_key="test-key"):
-    """Yields text chunks from the vLLM streaming API."""
-    b64 = encode_frame_base64(frame_bgr)
+def call_vllm_stream(frames: list, prompt: str, vllm_url: str,
+                     model_name: str, api_key: str = "test-key"):
+    """10초 링버퍼 프레임 전부를 한 요청에 넣어 스트리밍 응답을 yield."""
+    # 이미지 → text 순서 (Qwen2.5-VL 권장)
+    content = []
+    for f in frames:
+        b64 = encode_frame_base64(f)
+        content.append({"type": "image_url",
+                         "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+    content.append({"type": "text", "text": prompt})
+
     payload = {
         "model": model_name,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                ],
-            }
-        ],
+        "messages": [{"role": "user", "content": content}],
         "max_tokens": 512,
         "temperature": 0.1,
         "stream": True,
@@ -322,26 +336,25 @@ def rtsp_capture_worker(rtsp_url):
                 pass
         anno_queue.put(frame)   # no copy — YOLO worker reads it promptly
 
-        # ── VLM analysis queue: rate-limited to CAPTURE_FPS ─────────────────
+        # ── 링버퍼: 1fps로 최신 10장 유지 ──────────────────────────────────
         now = time.time()
         if now - last_analysis_time >= FRAME_INTERVAL:
-            if frame_queue.full():
-                try:
-                    frame_queue.get_nowait()
-                except queue.Empty:
-                    pass
-            frame_queue.put(frame.copy())
+            with frame_buffer_lock:
+                frame_buffer.append(frame.copy())
             last_analysis_time = now
 
     cap.release()
 
 
 def vlm_analysis_worker():
+    """링버퍼에 쌓인 최대 10장을 한 번에 vLLM으로 전송해 분석."""
     global running
     while running:
-        try:
-            frame = frame_queue.get(timeout=1)
-        except queue.Empty:
+        # 버퍼에 프레임이 쌓일 때까지 대기
+        with frame_buffer_lock:
+            n = len(frame_buffer)
+        if n == 0:
+            time.sleep(0.5)
             continue
 
         with settings_lock:
@@ -351,13 +364,19 @@ def vlm_analysis_worker():
             api_key  = settings["api_key"]
 
         if not prompt:
+            time.sleep(0.5)
             continue
 
+        # 현재 버퍼 스냅샷 (최대 10장)
+        with frame_buffer_lock:
+            frames = list(frame_buffer)
+
         ts = datetime.now().strftime("%H:%M:%S")
-        manager.emit({"type": "status", "text": f"[{ts}] 분석 중..."})
+        manager.emit({"type": "status",
+                       "text": f"[{ts}] 분석 중… ({len(frames)}장)"})
         manager.emit({"type": "result_start", "time": ts})
 
-        for chunk in call_vllm_stream(frame, prompt, vllm_url, model, api_key):
+        for chunk in call_vllm_stream(frames, prompt, vllm_url, model, api_key):
             manager.emit({"type": "chunk", "text": chunk})
 
         manager.emit({"type": "result_end"})
