@@ -260,8 +260,8 @@ def _stamp_frame(frame, idx: int, total: int):
     """각 프레임 좌상단에 시간 라벨을 삽입해 VLM이 순서를 파악하게 한다."""
     out = frame.copy()
     age = total - idx - 1          # 0 = 현재, total-1 = 가장 오래된 프레임
-    time_str = "now" if age == 0 else f"{age}s ago"
-    label = f"Frame {idx + 1}/{total}  ({time_str})"
+    time_str = "현재" if age == 0 else f"{age}초 전"
+    label = f"프레임 {idx + 1}/{total}  ({time_str})"
     font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1
     (tw, th), _ = cv2.getTextSize(label, font, scale, thick)
     cv2.rectangle(out, (4, 4), (tw + 14, th + 14), (0, 0, 0), cv2.FILLED)
@@ -284,9 +284,9 @@ def call_vllm_stream(frames: list, prompt: str, vllm_url: str,
 
     # ② 프롬프트 앞에 시간 흐름 설명 추가 → VLM이 이동 방향 등을 이해
     temporal_ctx = (
-        f"The {n} images above are consecutive frames captured 1 second apart "
-        f"(Frame 1 = {n-1}s ago → Frame {n} = now). "
-        "Use the temporal sequence to understand motion direction, speed, and changes over time.\n\n"
+        f"위 {n}장의 이미지는 1초 간격으로 촬영된 연속 프레임입니다. "
+        f"Frame 1이 {n-1}초 전, Frame {n}이 현재 시점입니다. "
+        "프레임 순서를 바탕으로 이동 방향, 속도, 행동 변화를 파악하여 답변하세요.\n\n"
     )
     content.append({"type": "text", "text": temporal_ctx + prompt})
 
